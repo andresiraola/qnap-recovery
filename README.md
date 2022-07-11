@@ -51,70 +51,113 @@ Preparing a VM with an up-to-date firmware
 
 * extract firmware and patch initrd
 
-  ``` bash
+```bash
 mkdir firmware
 tar xzf TS-X51_20211223-4.5.4.1892.tgz -C firmware
 cd firmware
-unlzma <../initrd.boot >initrd.cpio
+unlzma <initrd.boot >initrd.cpio
 mkdir initrd
 cd initrd
 cpio -i <../initrd.cpio
 patch -p1 <../../init_check.sh.diff
 find . | cpio --quiet -H newc -o | lzma -9 >../initrd.lzma
 cd ..
-  ```
+```
 
 * build disk image from rootfs2.bz
 
-  ```
-  dd if=/dev/zero of=usr.img bs=1k count=200k
-  mke2fs -F usr.img
-  mkdir rootfs2
-  cd rootfs2
-  tar --xz -xpf ../rootfs2.bz
-  mount ../usr.img home
-  cp -a usr/* home/
-  umount home
-  ```
+```
+dd if=/dev/zero of=usr.img bs=1k count=200k
+mke2fs -F usr.img
+mkdir rootfs2
+cd rootfs2
+tar --xz -xpf ../rootfs2.bz
+mount ../usr.img home
+cp -a usr/* home/
+umount home
+```
+
+* create an img to save the recovered data
+
+```sh
+qemu-img create restore.img 1536G
+```
 
 * start the VM
 
-  /dev/sdg1 is used to save the recovered data.
-
-  多添加一块硬盘/dev/sdg1 ，用于保存恢复的数据
-
-  ```
-  qemu-system-x86_64 -s -kernel bzImage -nographic -initrd initrd.lzma -snapshot -hda /dev/md1 -hdb usr.img -hdc /dev/sdg1 -m 4G --enable-kvm
-  ```
+```sh
+qemu-system-x86_64 -s -kernel bzImage -nographic -initrd initrd.lzma -snapshot -drive format=raw,file=qnap-hdd.img -hdb usr.img -drive format=raw,file=restore.img -m 4G --enable-kvm
+```
 
 * login with admin / admin
 
-* mount the device
+* mount the usr.img
 
-  ``` bash
-  # link to /dev/md1, so that pvscan recognizes it
-  ln /dev/sda /dev/md1
+```sh
   mkdir /usr
   mount /dev/sdb /usr
-  pvscan --cache /dev/md1
-  
-  # pvs should now show the volume group, and lvs the volumes
-  pvs
-  lvs
-  
-  # activate the thin pool and the volume
-  lvchange -a y vg1/lv2
-  
-  # mount the device
-  # because we are read-only, a dirty ext4 can only be mounted with '-o ro,noload'
-  # for a complete journal replay, switch to read-write mode, or to be safe
-  # copy the raw block device to the host and replay it on the copy
-  mount -t ext4 /dev/mapper/vg1-lv2 /mnt/ext/
-  
-  mkdir /mnt/recovered
-  mount /dev/sdc /mnt/recovered
-  cp -a /mnt/ext/* /mnt/recovered
-  ```
+```
 
+* logout and login
 
+* initialize lvm as it failed previosly because of the missing /usr
 
+```sh
+/sbin/daemon_mgr lvmetad start "/sbin/lvmetad"
+```
+
+* prepare the raid stuff. tested on a single disk raid
+
+```sh
+mkdir -p /run/mdadm/
+mdadm --examine --scan > /etc/mdadm.conf
+mdadm --assemble --scan
+```
+
+* do the pv & lv stuff
+
+```sh
+pvscan --cache /dev/md2 # pick the biggest
+
+# just to visualize
+pvs
+lvs
+
+# activate the thin pool and the volume
+lvchange -a y vg2/lv2
+
+# mount it!
+mount -t ext4 /dev/mapper/vg2-lv2 /mnt/ext
+
+# enjoy
+ls /mnt/ext
+```
+
+* prepare the restore disk
+
+```sh
+# list and identify the restore disk
+parted -l
+
+# partition it
+parted /dev/sdc
+> print
+> mklabel gpt
+> mkpart primary ext4 0% 100%
+> quit
+
+# format
+mke2fs -t ext4 /dev/sdc1
+
+# mount it
+mkdir -p /mnt/restore
+mount -t ext4 /dev/sdc1 /mnt/restore
+```
+
+* copy the files
+
+```sh
+cp -av /mnt/ext/. /mnt/restore/
+```
+
+* use `control + a` then `x` to exit the qemu monitor
